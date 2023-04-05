@@ -1,129 +1,142 @@
 #include "iic.h"
+static uint8_t fac_us = 72;    //这里主时钟为72M, 所以在1us内ticks会减72次
 
-
-// IIC总线的延时函数，根据实际情况调整时间
-void IIC_Delay()
+/*
+  * @brief	延时函数
+  * @note   延时微秒函数
+  * @param  微秒
+  * @retval void
+  */
+void delay_us(uint32_t nus)
 {
-	uint8_t i;
-
-	/*　
-	 	下面的时间是通过逻辑分析仪测试得到的。
-    工作条件：CPU主频72MHz ，MDK编译环境，1级优化
-  
-		循环次数为10时，SCL频率 = 205KHz 
-		循环次数为7时，SCL频率 = 347KHz， SCL高电平时间1.5us，SCL低电平时间2.87us 
-	 	循环次数为5时，SCL频率 = 421KHz， SCL高电平时间1.25us，SCL低电平时间2.375us 
-	*/
-	for (i = 0; i < 10; i++);
+	uint32_t ticks;
+	uint32_t told,tnow,tcnt=0;
+	uint32_t reload=SysTick->LOAD;	//装载值
+	ticks=nus*fac_us; //需要的节拍数
+	told=SysTick->VAL; //刚进入时的计数器值
+	while(1)
+	{
+		tnow=SysTick->VAL;
+		if(tnow!=told)
+		{
+			if(tnow<told)tcnt+=told-tnow;	//计数器递减
+			else tcnt+=reload-tnow+told;
+			told=tnow;
+			if(tcnt>=ticks)break;	//时间超过或等于延迟的时间时退出.
+		}
+	};
 }
 
-
-// IIC总线的初始化函数
 void IIC_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-	//开启时钟
+  //开启GPIO时钟
   IIC_SDA_GPIO_CLK_ENABLE();
-	IIC_SCL_GPIO_CLK_ENABLE();
-
-  // 配置SDA、SCL引脚为开漏输出
-  GPIO_InitStruct.Pin = SDA_GPIO_PIN | SCL_GPIO_PIN;
+  IIC_SCL_GPIO_CLK_ENABLE();
+  // 设置SDA参数
+  GPIO_InitStruct.Pin = SDA_GPIO_PIN;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	
-	//注意：如果不在同个port，需要初始化两次
+  // 初始化SDA
   HAL_GPIO_Init(SDA_GPIO_PORT, &GPIO_InitStruct);
 
-  // 初始化时将SDA、SCL置高
-  IIC_SDA_1();
-  IIC_SCL_1();
-	
+  // 设置SCL参数
+  GPIO_InitStruct.Pin = SCL_GPIO_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  // 初始化SCL
+  HAL_GPIO_Init(SCL_GPIO_PORT, &GPIO_InitStruct);
+
+  //发送停止信号
+  IIC_Stop();
 }
 
-// IIC总线的起始信号函数
+/**
+ * 发送停止信号
+ */
 void IIC_Start(void)
 {
-  // 先将SDA、SCL置高
+  // 准备发送起始信号
   IIC_SDA_1();
   IIC_SCL_1();
-  IIC_Delay();
-
-  // 拉低SDA，开始起始信号
+  delay_us(1);
+  //发送起始信号
   IIC_SDA_0();
-  IIC_Delay();
-
-  // 拉低SCL，开始传输数据
-  IIC_SCL_0();
-  IIC_Delay();
+  delay_us(1);
 }
 
-// IIC总线的停止信号函数
+/**
+ * 停止信号
+ */
 void IIC_Stop(void)
 {
-  // 先将SDA、SCL置低
+  //准备发送停止信号
   IIC_SDA_0();
   IIC_SCL_1();
-  IIC_Delay();
-  // 拉高SCL，传输结束
+  delay_us(1);
+  // 发送停止信号
   IIC_SDA_1();
 }
 
-//发送数据
+/**
+ * 发送数据
+ */
 void IIC_SendByte(uint8_t _ucByte)
 {
 	uint8_t i;
-
- /* 先发送字节的高位 bit7 */
+	IIC_SCL_0();
+ /* 写7bit数据 */
 	for (i = 0; i < 8; i++) {
 		if (_ucByte & 0x80) {
 			IIC_SDA_1();
 		}else{
 			IIC_SDA_0();
 		}
-		IIC_Delay();
+		  delay_us(1);
 		IIC_SCL_1();
-		IIC_Delay();
+		  delay_us(1);
 		IIC_SCL_0();
-		if (i == 7) {
-			IIC_SDA_1(); // 释放总线
-		}
-		_ucByte <<= 1; /* 左移一个 bit */
-		IIC_Delay();
+		_ucByte <<= 1; /* 左移一个bit */
+		delay_us(1);
 	}
+	IIC_SDA_1();
+	delay_us(1);
 }
-//接收数据
+
+/**
+ * 读取数据
+ */
 uint8_t IIC_ReadByte(void)
 {
 	uint8_t i;
 	uint8_t value;
 
-	/* 读到第 1 个 bit 为数据的 bit7 */
+	/* 读取数据 */
 	value = 0;
 	for (i = 0; i < 8; i++) {
 		value <<= 1;
 		IIC_SCL_1();
-		IIC_Delay();
+		delay_us(1);
 		if (IIC_SDA_READ()) {
 			value++;
 		}
 		IIC_SCL_0();
-		IIC_Delay();
+		delay_us(1);
 	}
 	return value;
 }
 
-//等待从设备响应
+/**
+ * 等待从设备响应
+ */
 uint8_t IIC_WaitAck(void)
 {
 	uint8_t re;
-
-	IIC_SDA_1();	/* CPU释放SDA总线 */
-	IIC_Delay();
-	IIC_SCL_1();	/* CPU驱动SCL = 1, 此时器件会返回ACK应答 */
-	IIC_Delay();
-	if (IIC_SDA_READ())	/* CPU读取SDA口线状态 */
+	IIC_SDA_1();  //释放SDA
+	delay_us(1);
+	IIC_SCL_1(); //拉升SCL总线
+	delay_us(1);
+	if (IIC_SDA_READ())  //读取SDA线，判断slave有没有发送ACK
 	{
 		re = 1;
 	}
@@ -131,46 +144,33 @@ uint8_t IIC_WaitAck(void)
 	{
 		re = 0;
 	}
-	IIC_SCL_0();
-	IIC_Delay();
+	IIC_SCL_0(); //拉低SCL总线，读取确认信号完成
+	delay_us(1);
 	return re;
 }
 
-/*
-*********************************************************************************************************
-*	函 数 名: i2c_Ack
-*	功能说明: CPU产生一个ACK信号
-*	形    参：无
-*	返 回 值: 无
-*********************************************************************************************************
-*/
+/**
+ * 发送ACK
+ */
 void IIC_Ack(void)
 {
-	IIC_SDA_0();	/* CPU驱动SDA = 0 */
-	IIC_Delay();
-	IIC_SCL_1();	/* CPU产生1个时钟 */
-	IIC_Delay();
-	IIC_SCL_0();
-	IIC_Delay();
-	IIC_SDA_1();	/* CPU释放SDA总线 */
+	IIC_SDA_0();	//拉低SDA线，是ACK信号
+	delay_us(1);
+	IIC_SCL_1();	//拉升SCL
+	delay_us(1);
+	IIC_SCL_0();	//拉低SCL，发送ACK完成
+	delay_us(1);
+	IIC_SDA_1();	//释放SDA
 }
-
-/*
-*********************************************************************************************************
-*	函 数 名: i2c_NAck
-*	功能说明: CPU产生1个NACK信号
-*	形    参：无
-*	返 回 值: 无
-*********************************************************************************************************
-*/
+/**
+ * 发送NCK
+ */
 void IIC_NAck(void)
 {
-	IIC_SDA_1();	/* CPU驱动SDA = 1 */
-	IIC_Delay();
-	IIC_SCL_1();	/* CPU产生1个时钟 */
-	IIC_Delay();
-	IIC_SCL_0();
-	IIC_Delay();	
+	IIC_SDA_1();	//拉高SDA线，是NACK信号
+	delay_us(1);
+	IIC_SCL_1();	//拉升SCL线
+	delay_us(1);
+	IIC_SCL_0();	//拉低SCL线，发送NACK完成
+	delay_us(1);
 }
-
-
